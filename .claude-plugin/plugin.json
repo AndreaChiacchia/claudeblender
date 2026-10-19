@@ -1,0 +1,43 @@
+{
+  "name": "claudeblender",
+  "version": "0.2.0",
+  "description": "A pane with a live low-res view of your Blender scene, redrawn in half-block pixels after every Blender edit Claude or a subagent makes, with motion effects and settings in /config",
+  "author": { "name": "AndreaChiacchia", "url": "https://github.com/AndreaChiacchia" },
+  "license": "MIT",
+  "userConfig": {
+    "autoOpen": {
+      "type": "string",
+      "title": "Open on the first edit",
+      "description": "on: the pane opens by itself the first time Claude or a subagent edits the Blender scene in a session (an unasked pane shows from 144 terminal columns, 110 once you have opened it yourself). Closing it by hand keeps it closed for the rest of the session; /blender opens it again. off: only /blender opens it.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "view": {
+      "type": "string",
+      "title": "View",
+      "description": "The view the pane starts each session with; the chips under the picture change it for the session. viewport: what the largest 3D Viewport in Blender shows, at its shape. camera: through the scene camera, at the render resolution's shape. top, bottom, front, back, left, right: straight-on orthographic views framed on the scene, like Blender's numpad views. iso: a three-quarter view from the front right, above. Your own viewport and active camera never move.",
+      "default": "viewport",
+      "options": ["viewport", "camera", "top", "bottom", "front", "back", "left", "right", "iso"]
+    },
+    "shading": {
+      "type": "string",
+      "title": "Shading",
+      "description": "solid: Blender's Solid shading, fast and clear. material: Material Preview, the scene's real material colors; slower, and the first draw after new materials may show them unfinished. The viewport's own shading is put back after each draw.",
+      "default": "solid",
+      "options": ["solid", "material"]
+    },
+    "motion": {
+      "type": "string",
+      "title": "Motion",
+      "description": "How the pane moves. lively: a new frame wipes in from the top behind a warm glint line, a soft shimmer drifts across the old frame while Blender draws, the dot spins ◐ ◓ ◑ ◒ every 0.2 s, the object count and draw time roll with the changed digits flashing, the name of the agent that made the edit pulses in its color, ✦ fresh twinkles for 2 s, and a failed draw pulses ✗ red. subtle: the wipe without the glint, a fainter shimmer, the spinner a step every second, softer pulses, a plain fresh. off: a still pane, each frame swapped in at once.",
+      "default": "lively",
+      "options": ["lively", "subtle", "off"]
+    },
+    "server": {
+      "type": "string",
+      "title": "Blender MCP server",
+      "description": "The name of the Blender MCP server as /mcp lists it.",
+      "default": "blender"
+    }
+  }
+}
