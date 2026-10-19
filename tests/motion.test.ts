@@ -300,3 +300,19 @@ test('a rolling figure never spills past its placed digits', () => {
   expect(cells.length).toBe(40)
   expect(cellText(cells)).toContain('Scene · 12 obj')
 })
+
+test('a playing clip piece shows the frame given, at its placed width, under every level', () => {
+  const pieces: Segment[] = [
+    { text: 'Scene', fg: LIVE },
+    { text: '▶  1/60', fg: LIVE, role: 'play' },
+    { text: '3 obj', fg: PLAIN, role: 'objects' },
+  ]
+  for (const level of ['lively', 'subtle', 'off'] as const) {
+    const m = createPaneMotion()
+    const layout = layoutCaption(pieces, 40)
+    expect(cellText(composeCaption(m, layout, 'idle', 40, level, 37))).toContain('Scene · ▶ 37/60 · 3 obj')
+    expect(cellText(composeCaption(m, layout, 'idle', 40, level, 5))).toContain('Scene · ▶  5/60 · 3 obj')
+    // No frame given: the piece as laid out.
+    expect(cellText(composeCaption(m, layout, 'idle', 40, level))).toContain('▶  1/60')
+  }
+})

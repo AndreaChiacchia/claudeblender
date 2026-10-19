@@ -9,6 +9,7 @@ import {
   labelOf,
   layoutCaption,
   messageOf,
+  playText,
   shortOf,
 } from '../hooks/caption'
 import type { CaptionLayout, Segment } from '../hooks/caption'
@@ -193,4 +194,22 @@ test('layoutCaption: a piece that no longer fits on the last line ends it with a
   expect(layout.lines).toBe(3)
   expect(layout.items.some(i => i.text.includes('dropped'))).toBe(false)
   expect(layout.items.some(i => i.text.includes('d'))).toBe(false)
+})
+
+const BASE = { scene: 'Scene', objects: 3, ms: 120, at: Date.parse('2026-10-14T12:02:31Z'), by: null, errorMessage: null, offsetMin: 0 }
+
+test('playText pads the frame to the width of the last one', () => {
+  expect(playText(1, 60)).toBe('▶  1/60')
+  expect(playText(60, 60)).toBe('▶ 60/60')
+  expect(playText(7, 250)).toBe('▶   7/250')
+})
+
+test('a playing clip and a capture each add one piece after the scene name', () => {
+  const playing = captionSegments({ ...BASE, play: { kind: 'playing', frame: 1, end: 60 } })
+  expect(playing.map(s => s.text)).toEqual(['Scene', '▶  1/60', '3 obj', '120 ms', '12:02:31'])
+  expect(playing[1]?.role).toBe('play')
+  const capturing = captionSegments({ ...BASE, play: { kind: 'capturing', got: 14, total: 30 } })
+  expect(capturing.map(s => s.text)).toEqual(['Scene', 'capturing 14/30', '3 obj', '120 ms', '12:02:31'])
+  expect(captionSegments({ ...BASE, play: { kind: 'capturing', got: 0, total: null } })[1]?.text).toBe('capturing 0/…')
+  expect(captionSegments({ ...BASE, play: null }).map(s => s.text)).toEqual(['Scene', '3 obj', '120 ms', '12:02:31'])
 })

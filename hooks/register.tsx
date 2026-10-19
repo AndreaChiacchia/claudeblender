@@ -1,6 +1,6 @@
 import type { AgentInfo, EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Box as Room, By, Edit, FailCode, Frame, Pixels, Reply, Settings, ViewKind } from '../types'
+import type { Box as Room, By, Clip, ClipReply, Edit, FailCode, Frame, Pixels, Reply, Settings, ViewKind } from '../types'
 import { PEER_COLORS, PLAIN, LIVE, encodeCells } from './cells'
 import type { Cell } from './cells'
 import {
@@ -23,6 +23,7 @@ import {
   demoPixels,
 } from './demo'
 import type { DemoAgent, DemoEvent } from './demo'
+import { changesScene } from './edits'
 import {
   FRAME_MS,
   advance,
@@ -37,7 +38,7 @@ import {
 } from './motion'
 import type { DotState, PaneMotion } from './motion'
 import { boxFor, fitSize, halfBlockCells, placeFrame } from './pixels'
-import { parseReply } from './reply'
+import { parseClip, parseReply } from './reply'
 import { renderScript } from './script'
 import type { ScriptParams } from './script'
 import {
@@ -76,6 +77,12 @@ const DEFAULT_PANE = { cols: 72, bodyRows: 20 }
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
 /** The Blender MCP tools that change the scene: a draw follows each. */
 const TRIGGER_TOOLS: readonly string[] = ['execute_blender_code', 'import_asset', 'generate_3d']
+/** `/blender play` samples at most this many frames of the scene's range. */
+const CLIP_FRAMES = 48
+/** A capture batch asks for at most this many bytes of RGB: about one full-size frame, which the MCP passes whole. */
+const CLIP_BATCH_BYTES = 48_000
+/** Where blits are refused, a playing clip is redrawn at most this often (ms). */
+const PLAY_REDRAW_MS = 100
 
 type ErrorState = { code: FailCode; message: string; at: number }
 /** One Raster of the pane: its key, its width at the render, and its cells now. */
@@ -89,6 +96,10 @@ type Demo = {
   isStale: boolean
   saved: { frame: Frame | null; error: ErrorState | null }
 }
+/** `/blender play`: a capture asked for or under way (`got` of `total` frames so far), or the clip looping since `t0`. */
+type Play =
+  | { phase: 'capturing'; got: number; total: number | null; isAborted: boolean }
+  | { phase: 'playing'; clip: Clip; t0: number; index: number }
 
 /** The /config settings, read in `register`: a module variable, so /clear and /resume keep them. */
 let settings: Settings = DEFAULT_SETTINGS
@@ -141,6 +152,13 @@ let everBlitted = false
 let isStaticFallback = false
 let isBlitting = false
 let demo: Demo | null = null
+let play: Play | null = null
+/** Set by `/blender play`: the next flight captures the animation instead of drawing one frame. */
+let wantClip = false
+/** The clip's frames as half-block cells, made on first show for the box they were made for. */
+let clipCells: { cols: number; rows: number; cells: Array<Cell[] | undefined> } | null = null
+/** Redraws a playing clip where the slot refuses blits. */
+let playRedraw: Timer | null = null
 
 /** The motion level in force: still when the slot refuses blits. */
 const levelNow = () => (isStaticFallback ? 'off' : settings.motion)
@@ -164,6 +182,78 @@ function stopFrameTimer(): void {
 function stopDueTimer(): void {
   dueTimer?.cancel()
   dueTimer = null
+}
+
+function stopPlayRedraw(): void {
+  playRedraw?.cancel()
+  playRedraw = null
+}
+
+/** The looping clip, or null when none plays. */
+const playingNow = (): Extract<Play, { phase: 'playing' }> | null => (play?.phase === 'playing' ? play : null)
+
+/** Which of the clip's frames shows at `now`: real time from its start, each frame for `frameMs`, round and round. */
+function clipIndexAt(p: Extract<Play, { phase: 'playing' }>, now: number): number {
+  return Math.floor(Math.max(0, now - p.t0) / p.clip.frameMs) % p.clip.frames.length
+}
+
+/** The clip's frame `index` as half-block cells in `room`, made once per frame and box. */
+function clipFrameCells(clip: Clip, index: number, room: Room): Cell[] {
+  if (clipCells === null || clipCells.cols !== room.cols || clipCells.rows !== room.rows) {
+    clipCells = { cols: room.cols, rows: room.rows, cells: [] }
+  }
+  const made = clipCells.cells[index]
+  if (made !== undefined) return made
+  const f = clip.frames[index]
+  const cells = f === undefined ? [] : halfBlockCells(placeFrame(f.pixels, room), room.cols)
+  clipCells.cells[index] = cells
+
+  return cells
+}
+
+/** The scene frame the caption shows while a clip plays, else null. */
+function playFrameNow(): number | null {
+  const p = playingNow()
+
+  return p === null ? null : (p.clip.frames[p.index]?.n ?? null)
+}
+
+/** Forgets the clip and any capture asked for; a capture under way stops after its batch. */
+function forgetPlay(): void {
+  if (play?.phase === 'capturing') play.isAborted = true
+  play = null
+  wantClip = false
+  clipCells = null
+  stopPlayRedraw()
+}
+
+/**
+ * Ends `/blender play`. With `redraw`, the current frame is drawn again at once, since the held picture is the clip's first
+ * frame (an edit or a view pick that ends it draws by itself). A closed or hidden pane keeps the draw for when it shows.
+ */
+function stopPlay($: EngineInterface, redraw: boolean): void {
+  if (play === null && !wantClip) return
+  forgetPlay()
+  if (redraw) {
+    void (async () => {
+      const now = await $.clock.now()
+      markDirty(sched, now)
+      noteForce(sched, now)
+      await arm($)
+    })().catch(() => undefined)
+  }
+  $.ui.invalidate('ui.render')
+}
+
+/** Where blits are refused, a playing clip is moved on by redraws instead. */
+function kickPlayRedraw($: EngineInterface): void {
+  const p = playingNow()
+  if (p === null || !isStaticFallback) {
+    stopPlayRedraw()
+
+    return
+  }
+  playRedraw ??= $.clock.every(Math.max(PLAY_REDRAW_MS, p.clip.frameMs), () => $.ui.invalidate('ui.render'))
 }
 
 /** Forgets what the module knows of the picture's motion (a load, a new session, a demo's start or end). */
@@ -191,6 +281,7 @@ function resetSession(): void {
   stopDueTimer()
   timeoutTimer?.cancel()
   timeoutTimer = null
+  forgetPlay()
   silencePane()
 }
 
@@ -272,6 +363,8 @@ const paramsFor = (room: Room): ScriptParams => ({
 
 /** The view is picked (a chip, or `/blender view`): a forced draw follows at once, after the one in flight if any. Blender is not changed. */
 async function setView($: EngineInterface, choice: ViewChoice): Promise<void> {
+  // The view's own draw replaces a playing clip.
+  stopPlay($, false)
   viewChoice = choice
   const now = await $.clock.now()
   markDirty(sched, now)
@@ -313,6 +406,14 @@ async function startRender($: EngineInterface): Promise<void> {
     RENDER_TIMEOUT_MS,
     () => void settle($, gen, { kind: 'fail', code: 'timeout', message: '' }, edits, reqPane).catch(() => undefined),
   )
+  const cap = play
+  if (wantClip && cap?.phase === 'capturing' && !cap.isAborted) {
+    wantClip = false
+    await capture($, gen, cap, edits, reqBox, reqPane)
+
+    return
+  }
+  wantClip = false
   let reply = await callBlender($, paramsFor(reqBox))
   // The MCP layer cut the answer: draw smaller, once more in the same flight, and keep the size for the session.
   if (reply.kind === 'fail' && reply.code === 'truncated' && sizeScale > 0.25 && gen > settledGen) {
@@ -339,12 +440,7 @@ async function settle(
   edits: Edit[],
   reqPane: { cols: number; bodyRows: number },
 ): Promise<void> {
-  if (gen <= settledGen) return
-  settledGen = gen
-  timeoutTimer?.cancel()
-  timeoutTimer = null
-  isRendering = false
-  finish(sched)
+  if (!closeFlight(gen)) return
   const now = await $.clock.now()
   if (reply.kind === 'frame') noteCams(reply.cams, reply.active)
   else if (reply.cams !== undefined) noteCams(reply.cams, reply.active ?? '')
@@ -369,6 +465,8 @@ async function settle(
       demo.saved.frame = frameOf(demo.saved.frame, data)
       demo.saved.error = null
     } else {
+      // A new picture of the scene replaces a playing clip.
+      if (playingNow() !== null) forgetPlay()
       applyFrame(data)
     }
   } else if (demo !== null) {
@@ -376,15 +474,142 @@ async function settle(
   } else {
     applyError(reply.code, reply.message, now)
   }
+  afterFlight($)
+}
+
+/** Marks flight `gen` settled; false when it already was (a late reply after a timeout, or a timeout after a reply). */
+function closeFlight(gen: number): boolean {
+  if (gen <= settledGen) return false
+  settledGen = gen
+  timeoutTimer?.cancel()
+  timeoutTimer = null
+  isRendering = false
+  finish(sched)
+
+  return true
+}
+
+/** After a flight: the pane redrawn, its motion kicked, and the follow-up of edits that came meanwhile armed. */
+function afterFlight($: EngineInterface): void {
   $.ui.invalidate('ui.render')
   kick($)
   if (isStale(sched)) void arm($, MIN_GAP_MS).catch(() => undefined)
+}
+
+async function callClip($: EngineInterface, params: ScriptParams): Promise<ClipReply> {
+  try {
+    return parseClip(await $.mcp.call(settings.server, 'execute_blender_code', { code: renderScript(params) }))
+  } catch {
+    return { kind: 'fail', code: 'no-server', message: '' }
+  }
+}
+
+/**
+ * `/blender play`'s flight: the scene's frame range in batches sized to pass the MCP whole (halved when one is cut anyway),
+ * each with its own timeout. The first frame becomes the held frame through `settle`, then the clip loops. A capture stopped
+ * on the way (an edit, a view pick, /blender play stop, a demo) ends its flight after the batch with nothing shown.
+ */
+async function capture(
+  $: EngineInterface,
+  gen: number,
+  cap: Extract<Play, { phase: 'capturing' }>,
+  edits: Edit[],
+  reqBox: Room,
+  reqPane: { cols: number; bodyRows: number },
+): Promise<void> {
+  const params = paramsFor(reqBox)
+  let per = Math.max(1, Math.floor(CLIP_BATCH_BYTES / (params.maxW * params.maxH * 3)))
+  const frames: Clip['frames'] = []
+  let last: Extract<ClipReply, { kind: 'clip' }> | null = null
+  let ms = 0
+  const fail = (reply: Extract<Reply, { kind: 'fail' }>): Promise<void> => {
+    if (play === cap) play = null
+
+    return settle($, gen, reply, edits, reqPane)
+  }
+  for (;;) {
+    timeoutTimer?.cancel()
+    timeoutTimer = $.clock.after(
+      RENDER_TIMEOUT_MS,
+      () => void fail({ kind: 'fail', code: 'timeout', message: '' }).catch(() => undefined),
+    )
+    const reply = await callClip($, { ...params, clip: { max: CLIP_FRAMES, from: frames.length, count: per } })
+    if (gen <= settledGen) return
+    if (cap.isAborted || play !== cap) {
+      if (closeFlight(gen)) afterFlight($)
+
+      return
+    }
+    if (reply.kind === 'fail') {
+      if (reply.code === 'truncated' && per > 1) {
+        per = Math.max(1, Math.floor(per / 2))
+        continue
+      }
+      await fail(reply)
+
+      return
+    }
+    last = reply
+    ms += reply.ms
+    for (const f of reply.frames) frames.push({ n: f.n, pixels: { w: reply.w, h: reply.h, rgb: f.rgb } })
+    cap.got = frames.length
+    cap.total = reply.total
+    $.ui.invalidate('ui.render')
+    if (reply.frames.length === 0 || frames.length >= reply.total) break
+  }
+  const first = frames[0]
+  if (first === undefined || last === null) {
+    await fail({ kind: 'fail', code: 'bad-reply', message: '' })
+
+    return
+  }
+  await settle(
+    $,
+    gen,
+    {
+      kind: 'frame',
+      w: last.w,
+      h: last.h,
+      rgb: first.pixels.rgb,
+      scene: last.scene,
+      objects: last.objects,
+      ms,
+      blender: '',
+      view: last.view,
+      cam: last.cam,
+      cams: last.cams,
+      active: last.active,
+    },
+    edits,
+    reqPane,
+  )
+  if (play !== cap || cap.isAborted) return
+  if (frames.length < 2) {
+    play = null
+    $.ui.toast("Claude-Blender: the scene's frame range is a single frame; there is nothing to play.")
+    $.ui.invalidate('ui.render')
+
+    return
+  }
+  const now = await $.clock.now()
+  play = {
+    phase: 'playing',
+    clip: { frames, start: last.start, end: last.end, frameMs: Math.max(FRAME_MS, (1000 * last.step) / last.fps) },
+    t0: now,
+    index: 0,
+  }
+  clipCells = null
+  $.ui.invalidate('ui.render')
+  kick($)
+  kickPlayRedraw($)
 }
 
 /** An agent (or the person, with /blender refresh) changed the scene: noted, the pane opened if it should be, a draw armed. */
 async function onEdit($: EngineInterface, agentId: string | null, tool: string): Promise<void> {
   const at = await $.clock.now()
   noteEdit(sched, { agentId, tool, at })
+  // The scene changed under the clip: it stops, and the edit's own draw shows the current frame.
+  stopPlay($, false)
   if (agentId !== null) assignColor(palette, agentId)
   // The agent is alive while its tool call runs: its label is taken now, since a short-lived subagent has left the list by the draw.
   if (agentId !== null && !labels.has(agentId)) {
@@ -408,7 +633,11 @@ async function onEdit($: EngineInterface, agentId: string | null, tool: string):
 
 /** True while there is a pane to repaint and something to move in it. */
 function needsTimer(): boolean {
-  return site !== null && !isStaticFallback && settings.motion !== 'off' && isActive(motion, isRendering, settings.motion)
+  if (site === null || isStaticFallback) return false
+  // A playing clip moves under every motion level: it was asked for.
+  if (playingNow() !== null) return true
+
+  return settings.motion !== 'off' && isActive(motion, isRendering, settings.motion)
 }
 
 function kick($: EngineInterface): void {
@@ -421,15 +650,17 @@ async function step($: EngineInterface): Promise<void> {
   isBlitting = true
   try {
     const target = site
-    if (levelNow() === 'off') {
+    const playing = playingNow()
+    if (levelNow() === 'off' && playing === null) {
       stopFrameTimer()
 
       return
     }
     advance(motion)
+    if (playing !== null) playing.index = clipIndexAt(playing, await $.clock.now())
     for (const piece of target.pieces) {
-      // While only the shimmer moves the picture it is drawn at 10 fps.
-      if (piece.key === KEY_IMAGE && !isWipeActive(motion) && motion.tick % 2 !== 0) continue
+      // While only the shimmer moves the picture it is drawn at 10 fps; a playing clip at its own rate.
+      if (piece.key === KEY_IMAGE && playing === null && !isWipeActive(motion) && motion.tick % 2 !== 0) continue
       const cells = piece.compose()
       if (cells.length !== piece.width) {
         // A size change is a redraw, never a blit.
@@ -546,6 +777,8 @@ async function onDemoTick($: EngineInterface): Promise<void> {
 
 /** Starts the demo, or restarts it from the beginning when one runs. The real frame and error are set aside until it ends. */
 function startDemo($: EngineInterface): void {
+  // The clip stops; the current frame is drawn once the demo ends.
+  stopPlay($, true)
   const saved = demo !== null ? demo.saved : { frame, error }
   demo?.timer.cancel()
   stopDueTimer()
@@ -586,7 +819,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'blender',
       description: 'Show the live Blender view in a pane; pick a view, refresh, close or demo it',
-      argumentHint: '[refresh | view <name> | views | close | demo | demo stop]',
+      argumentHint: '[refresh | view <name> | views | play | play stop | close | demo | demo stop]',
     })
     endDemo($)
     resetSession()
@@ -604,7 +837,12 @@ export const register: Register = (on, options) => {
     const prefix = toolPrefix(settings.server)
     if (name.startsWith(prefix) && ran.deny === undefined) {
       const tool = name.slice(prefix.length)
-      if (TRIGGER_TOOLS.includes(tool)) void onEdit($, e.agentId ?? null, tool).catch(() => undefined)
+      // A script that only reads the scene draws nothing, unless the redraw setting says every call.
+      const isRead =
+        tool === 'execute_blender_code' &&
+        settings.redraw === 'edits' &&
+        !changesScene((e as unknown as { code?: unknown }).code)
+      if (TRIGGER_TOOLS.includes(tool) && !isRead) void onEdit($, e.agentId ?? null, tool).catch(() => undefined)
     }
 
     return ran
@@ -615,6 +853,8 @@ export const register: Register = (on, options) => {
     if (e.id === PANE) {
       isPaneOpen = false
       if (e.origin.kind === 'person') isAutoOpenSuppressed = true
+      // The clip ends with the pane; the next opening draws the current frame.
+      stopPlay($, true)
       stopFrameTimer()
       site = null
     }
@@ -639,6 +879,7 @@ export const register: Register = (on, options) => {
     }
     if (arg === 'refresh') {
       await open()
+      stopPlay($, false)
       const now = await $.clock.now()
       noteEdit(sched, { agentId: null, tool: 'refresh', at: now })
       noteForce(sched, now)
@@ -672,6 +913,29 @@ export const register: Register = (on, options) => {
 
       return { text: 'Stopped the demo: the pane shows your Blender scene again.' }
     }
+    if (arg === 'play') {
+      if (play?.phase === 'capturing') return { text: 'Already capturing the animation; it plays as soon as it is in.' }
+      await open()
+      endDemo($)
+      stopPlay($, false)
+      play = { phase: 'capturing', got: 0, total: null, isAborted: false }
+      wantClip = true
+      const now = await $.clock.now()
+      markDirty(sched, now)
+      noteForce(sched, now)
+      void arm($).catch(() => undefined)
+      $.ui.invalidate('ui.render')
+
+      return {
+        text: `Capturing the scene's frame range, up to ${CLIP_FRAMES} frames; it then loops in the pane until an edit, a view pick or /blender play stop. Blender's current frame is put back after each batch.`,
+      }
+    }
+    if (arg === 'play stop') {
+      if (play === null) return { text: 'Nothing is playing.' }
+      stopPlay($, true)
+
+      return { text: 'Stopped the animation: the pane draws the current frame again.' }
+    }
 
     const known = (): string => (camsKnown ? (cams.length > 0 ? cams.join(', ') : 'none') : 'not known until the first draw')
     if (arg === 'views' || arg === 'view') {
@@ -699,7 +963,7 @@ export const register: Register = (on, options) => {
     }
 
     return {
-      text: 'Claude-Blender: /blender opens the view, /blender view <name> picks a view (/blender views lists them), /blender refresh draws it now, /blender close closes it, /blender demo plays the effects. The settings are in /config.',
+      text: 'Claude-Blender: /blender opens the view, /blender view <name> picks a view (/blender views lists them), /blender refresh draws it now, /blender play loops the animation (/blender play stop ends it), /blender close closes it, /blender demo plays the effects. The settings are in /config.',
     }
   })
 
@@ -721,6 +985,8 @@ export const register: Register = (on, options) => {
     offsetMin = -new Date(now).getTimezoneOffset()
     paneSize = { cols: e.props.bodyColumns, bodyRows: e.props.scroll?.bodyRows ?? OPEN_ROWS }
     const cols = clamp(paneSize.cols, 8, 160)
+    const playing = playingNow()
+    if (playing !== null) playing.index = clipIndexAt(playing, now)
     const held = frame
     // The row budget: the caption's lines and the chip rows come out of the body; the picture keeps at least MIN_IMAGE_ROWS.
     const layout = held === null ? null : layoutCaption(captionSegments(captionInputOf(held)), cols)
@@ -733,13 +999,14 @@ export const register: Register = (on, options) => {
     // Draws arm from here only when nothing else will: the first draw, a resize of the pane itself, and edits made while the pane
     // was hidden. A caption or chip row that changes height only rescales the held frame. After a failure only a new edit,
     // a view pick or /blender refresh draws again, so an offline Blender is never polled; such an edit made while the pane
-    // was hidden still draws when it shows.
+    // was hidden still draws when it shows. A playing clip is rescaled on a resize, never drawn again.
     if (demo === null && !sched.inFlight && dueTimer === null) {
       if (error === null && frame === null && !triedSinceOpen) {
         markDirty(sched, now)
         void arm($).catch(() => undefined)
       } else if (
         error === null &&
+        play === null &&
         frame !== null &&
         (frame.reqPane.cols !== paneSize.cols || frame.reqPane.bodyRows !== paneSize.bodyRows)
       ) {
@@ -759,11 +1026,18 @@ export const register: Register = (on, options) => {
       const placed = placeFrame(held.pixels, room)
       const base = halfBlockCells(placed, room.cols)
       const rows = placed.rows
-      const captionOf = (): Cell[] => composeCaption(motion, layout, dotNow(), cols, levelNow())
+      // While a clip plays the picture is its current frame, the same size as the held one (its first).
+      const baseNow = (): Cell[] => {
+        const p = playingNow()
+        const cells = p === null ? base : clipFrameCells(p.clip, p.index, room)
+
+        return cells.length === base.length ? cells : base
+      }
+      const captionOf = (): Cell[] => composeCaption(motion, layout, dotNow(), cols, levelNow(), playFrameNow())
       const imageOf = (): Cell[] =>
-        composeImage(motion, base, room.cols, rows, { isStale: staleNow(), isRendering }, levelNow())
-      const image = composeImage(motion, base, room.cols, rows, { isStale: staleNow(), isRendering }, level)
-      const caption = composeCaption(motion, layout, dotNow(), cols, level)
+        composeImage(motion, baseNow(), room.cols, rows, { isStale: staleNow(), isRendering }, levelNow())
+      const image = composeImage(motion, baseNow(), room.cols, rows, { isStale: staleNow(), isRendering }, level)
+      const caption = composeCaption(motion, layout, dotNow(), cols, level, playFrameNow())
       const imageEncoded = encodeCells(image)
       const captionEncoded = encodeCells(caption)
       pieces.push({ key: KEY_IMAGE, width: room.cols * rows, compose: imageOf })
@@ -785,7 +1059,7 @@ export const register: Register = (on, options) => {
       body = (
         <Box flexDirection="row">
           <Raster key={KEY_DOT} columns={1} rows={1} cells={dotEncoded} />
-          <Text dimColor> Drawing the Blender scene…</Text>
+          <Text dimColor>{play?.phase === 'capturing' ? ' Capturing the animation…' : ' Drawing the Blender scene…'}</Text>
         </Box>
       )
     } else if (error !== null) {
@@ -814,6 +1088,7 @@ export const register: Register = (on, options) => {
       site = { requestId: e.requestId, pieces }
       kick($)
     }
+    kickPlayRedraw($)
 
     // The view chips follow the body in every state: the current one bracketed and bright, the others dim, no gap between them.
     const chips = chipRows.map(row => (
@@ -841,8 +1116,11 @@ export const register: Register = (on, options) => {
   })
 }
 
-/** The caption's input for a frame: the failure message too, while the last draw failed. */
+/** The caption's input for a frame: the failure message too, while the last draw failed, and the clip or its capture. */
 function captionInputOf(f: Frame): CaptionInput {
+  const p = play
+  const first = p?.phase === 'playing' ? p.clip.frames[0] : undefined
+
   return {
     scene: f.scene,
     objects: f.objects,
@@ -851,5 +1129,11 @@ function captionInputOf(f: Frame): CaptionInput {
     by: f.by === null ? null : { label: f.byLabel, color: f.byColor, others: f.by.others },
     errorMessage: error === null ? null : error.message,
     offsetMin,
+    play:
+      p === null
+        ? null
+        : p.phase === 'capturing'
+          ? { kind: 'capturing', got: p.got, total: p.total }
+          : { kind: 'playing', frame: first?.n ?? p.clip.start, end: p.clip.end },
   }
 }

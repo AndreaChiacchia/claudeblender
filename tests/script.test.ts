@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { MARK_BEGIN, MARK_END, renderScript } from '../hooks/script'
+import { MARK_BEGIN, MARK_END, MAX_CLIP_FRAMES, renderScript } from '../hooks/script'
 import type { ScriptParams } from '../hooks/script'
 
 const B64 = /base64\.b64decode\('([^']*)'\)/
@@ -29,6 +29,39 @@ test('the script draws offscreen, prints one marked line and restores what it ch
     expect(code).toContain(part)
   }
   expect(paramsIn(code)).toEqual({ maxW: 72, maxH: 40, ss: 2, view: 'viewport', cam: '', shading: 'solid' })
+})
+
+test('the pixels are read through the buffer protocol, with to_list as the fallback', () => {
+  const code = renderScript(base)
+  expect(code).toContain('a = np.asarray(buf)')
+  expect(code).toContain("isf = a.dtype.kind == 'f'")
+  expect(/except Exception:\n\s+a = np\.asarray\(buf\.to_list\(\), dtype=np\.float32\)/.test(code)).toBe(true)
+  // The fast path comes first.
+  expect(code.indexOf('np.asarray(buf)')).toBeLessThan(code.indexOf('buf.to_list()'))
+})
+
+test('a capture carries its batch, clamped, and only when asked', () => {
+  expect(paramsIn(renderScript(base)).clip).toBeUndefined()
+  expect(paramsIn(renderScript({ ...base, clip: { max: 48, from: 10, count: 5 } })).clip).toEqual({ max: 48, from: 10, count: 5 })
+  expect(paramsIn(renderScript({ ...base, clip: { max: 9999, from: -3, count: 0.5 } })).clip).toEqual({
+    max: MAX_CLIP_FRAMES,
+    from: 0,
+    count: 1,
+  })
+})
+
+test('a capture sets each frame and puts the current frame back in the same finally', () => {
+  const code = renderScript({ ...base, clip: { max: 48, from: 0, count: 5 } })
+  const fin = code.indexOf('finally:')
+  expect(code).toContain('old_f, old_sub = scene.frame_current, scene.frame_subframe')
+  expect(code.indexOf('scene.frame_set(fr)')).toBeLessThan(fin)
+  expect(code.indexOf('scene.frame_set(old_f, subframe=old_sub)')).toBeGreaterThan(fin)
+  // The batch is sampled from the scene's range, and the reply says where it sits in it.
+  for (const part of ['scene.frame_start', 'scene.frame_end', "'total'", "'from'", "'step'", "'fps': r.fps / r.fps_base"]) {
+    expect(code).toContain(part)
+  }
+  // The frame is the only scene property it sets.
+  expect(/frame_current\s*=(?!=)/.test(code)).toBe(false)
 })
 
 test('the sizes are clamped to 160 x 96 and floored to integers', () => {

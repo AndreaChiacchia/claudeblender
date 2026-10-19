@@ -3,19 +3,27 @@ import { expect, test } from 'claude-code/testing'
 import { DEFAULT_SETTINGS, normalizeSettings, toolPrefix } from '../hooks/settings'
 
 test('the defaults', () => {
-  expect(DEFAULT_SETTINGS).toEqual({ autoOpen: true, view: 'viewport', shading: 'solid', motion: 'lively', server: 'blender' })
+  expect(DEFAULT_SETTINGS).toEqual({
+    autoOpen: true,
+    view: 'viewport',
+    shading: 'solid',
+    motion: 'lively',
+    redraw: 'edits',
+    server: 'blender',
+  })
   expect(normalizeSettings({})).toEqual(DEFAULT_SETTINGS)
 })
 
 test('values are taken, and an unknown one falls back to its default', () => {
-  expect(normalizeSettings({ autoOpen: 'off', view: 'camera', shading: 'material', motion: 'subtle' })).toEqual({
+  expect(normalizeSettings({ autoOpen: 'off', view: 'camera', shading: 'material', motion: 'subtle', redraw: 'every' })).toEqual({
     autoOpen: false,
     view: 'camera',
     shading: 'material',
     motion: 'subtle',
+    redraw: 'every',
     server: 'blender',
   })
-  expect(normalizeSettings({ autoOpen: 'maybe', view: 'x', shading: 3, motion: 'wild' })).toEqual(DEFAULT_SETTINGS)
+  expect(normalizeSettings({ autoOpen: 'maybe', view: 'x', shading: 3, motion: 'wild', redraw: 'never' })).toEqual(DEFAULT_SETTINGS)
 })
 
 test('every view preset is a valid value of the view setting', () => {

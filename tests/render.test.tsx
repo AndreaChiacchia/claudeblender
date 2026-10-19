@@ -167,9 +167,12 @@ const begin = ($: Engine) => $.session.start({ cwd: '/x/proj', surface: 'termina
 const command = ($: Engine, args: string) =>
   $.command.run({ command: 'blender', args, origin: { kind: 'composer' } } as never) as Promise<{ text: string }>
 
+const WRITE = 'bpy.ops.mesh.primitive_cube_add()'
+const READ = 'print(len(bpy.data.objects))'
+
 /** A Blender edit by the main loop, or by the subagent `agentId`. */
-const edit = ($: Engine, tool = 'execute_blender_code', agentId?: string) =>
-  $.tool.call({ tool: `mcp__blender__${tool}`, code: 'x', ...(agentId === undefined ? {} : { agentId }) } as never)
+const edit = ($: Engine, tool = 'execute_blender_code', agentId?: string, code = WRITE) =>
+  $.tool.call({ tool: `mcp__blender__${tool}`, code, ...(agentId === undefined ? {} : { agentId }) } as never)
 
 test('/blender is registered, opens the pane and says so', async ($, on) => {
   const w = world(on)
@@ -181,7 +184,7 @@ test('/blender is registered, opens the pane and says so', async ($, on) => {
   expect(w.opens[0]?.id).toBe('blender')
   expect(w.opens[0]?.title).toBe('Claude-Blender')
   expect((await command($, 'what')).text).toBe(
-    'Claude-Blender: /blender opens the view, /blender view <name> picks a view (/blender views lists them), /blender refresh draws it now, /blender close closes it, /blender demo plays the effects. The settings are in /config.',
+    'Claude-Blender: /blender opens the view, /blender view <name> picks a view (/blender views lists them), /blender refresh draws it now, /blender play loops the animation (/blender play stop ends it), /blender close closes it, /blender demo plays the effects. The settings are in /config.',
   )
 })
 
@@ -225,6 +228,28 @@ test('a read-only Blender tool and another server draw nothing', async ($, on) =
   await w.clock.advance(5000)
   expect(w.calls.length).toBe(0)
   expect(w.opens.length).toBe(0)
+})
+
+test('an execute_blender_code call that only reads draws nothing and opens nothing', async ($, on) => {
+  const w = world(on)
+  await begin($)
+  await edit($, 'execute_blender_code', undefined, READ)
+  await w.clock.advance(5000)
+  expect(w.calls.length).toBe(0)
+  expect(w.opens.length).toBe(0)
+  // A write after it draws as before.
+  await edit($)
+  await w.clock.advance(350)
+  expect(w.opens.length).toBe(1)
+})
+
+test('with Redraw on every, a reading call draws too', { options: { redraw: 'every' } }, async ($, on) => {
+  const w = world(on)
+  w.state.open = true
+  await begin($)
+  await edit($, 'execute_blender_code', undefined, READ)
+  await w.clock.advance(350)
+  expect(w.calls.length).toBe(1)
 })
 
 test('three edits 100 ms apart make one call', async ($, on) => {
@@ -646,4 +671,168 @@ test('a caption that grows a line draws no extra frame once the scheduler is idl
   expect(rasters(await ui.drawn())[1]?.props?.rows).toBe(2)
   await w.clock.advance(10_000)
   expect(w.calls.length).toBe(2)
+})
+
+/** Blender's answer to a capture batch: the range sampled as the script samples it, each frame filled by its number. */
+function clipAnswer(code: string, range: { start: number; end: number; fps: number }, w = 65, h = 40): Answer {
+  const clip = paramsIn(code).clip as { max: number; from: number; count: number }
+  const step = Math.max(1, Math.ceil((range.end - range.start + 1) / clip.max))
+  const all: number[] = []
+  for (let f = range.start; f <= range.end; f += step) all.push(f)
+  const frames = all
+    .slice(clip.from, clip.from + clip.count)
+    .map(n => ({ n, rgb: b64(new Uint8Array(w * h * 3).fill((n * 4) & 0xff)) }))
+  const body = { v: 1, ok: true, clip: true, w, h, frames, total: all.length, from: clip.from, step, ...range, scene: 'Scene', objects: 3, ms: 40, view: 'viewport' }
+
+  return answerOf(JSON.stringify({ result: 'Code executed successfully: ' + MARK_BEGIN + JSON.stringify(body) + MARK_END + '\n' }))
+}
+
+/** Blender with an animation: a capture batch for a capture's script, a frame for any other. */
+const animated =
+  (w: ReturnType<typeof world>, range = { start: 1, end: 60, fps: 24 }) =>
+  async (): Promise<Answer> => {
+    const code = w.calls[w.calls.length - 1]?.code ?? ''
+
+    return paramsIn(code).clip === undefined ? frameReply(65, 40) : clipAnswer(code, range)
+  }
+
+type Batch = { max: number; from: number; count: number }
+const batchOf = (call: { code: string } | undefined): Batch | undefined =>
+  call === undefined ? undefined : (paramsIn(call.code).clip as Batch | undefined)
+
+/** The pane, open and drawn, with `/blender play` run and its capture in. */
+async function playing($: Engine, on: On, range?: { start: number; end: number; fps: number }) {
+  const w = world(on)
+  w.state.open = true
+  w.state.reply = animated(w, range)
+  const ui = await $.ui.mount(PANE as never)
+  await ui.drawn()
+  const said = await command($, 'play')
+  await w.clock.advance(10)
+
+  return { w, ui, said }
+}
+
+const captionTexts = (blits: { key: string; cells: string }[]): string[] =>
+  blits.filter(b => b.key === 'blender-caption').map(b => cellText(decodeCells(b.cells)))
+
+test('/blender play captures the frame range in batches, then loops it with no more calls', async ($, on) => {
+  const { w, ui, said } = await playing($, on)
+  expect(said.text).toContain("Capturing the scene's frame range, up to 48 frames")
+  // 60 frames sampled down to 48 or fewer: every other frame, 30 in all, asked for in batches that follow on.
+  const batches = w.calls.map(batchOf)
+  expect(batches.length).toBeGreaterThan(1)
+  let next = 0
+  for (const b of batches) {
+    expect(b?.max).toBe(48)
+    expect(b?.from).toBe(next)
+    next += b?.count ?? 0
+  }
+  expect(next).toBeGreaterThanOrEqual(30)
+  expect(seen(await ui.drawn())).toMatch(/▶ +1\/60/)
+  const calls = w.calls.length
+  const before = w.blits.length
+  await w.clock.advance(2000)
+  expect(w.calls.length).toBe(calls)
+  const images = new Set(w.blits.slice(before).filter(b => b.key === 'blender-image').map(b => b.cells))
+  expect(images.size).toBeGreaterThan(10)
+  const shown = new Set(captionTexts(w.blits.slice(before)).map(t => /▶ +(\d+)\/60/.exec(t)?.[1]))
+  expect(shown.size).toBeGreaterThan(10)
+  // Every other frame, at 24 fps: about 12 pictures a second.
+  expect([...shown].every(n => n !== undefined && Number(n) % 2 === 1)).toBe(true)
+})
+
+test('an edit stops the clip, and its draw is of the current frame', async ($, on) => {
+  const { w, ui } = await playing($, on)
+  const calls = w.calls.length
+  await edit($)
+  await w.clock.advance(350)
+  expect(w.calls.length).toBe(calls + 1)
+  expect(batchOf(w.calls[w.calls.length - 1])).toBeUndefined()
+  expect(seen(await ui.drawn())).not.toContain('▶')
+})
+
+test('/blender play stop draws the current frame at once', async ($, on) => {
+  const { w, ui } = await playing($, on)
+  const calls = w.calls.length
+  expect((await command($, 'play stop')).text).toBe('Stopped the animation: the pane draws the current frame again.')
+  await w.clock.advance(10)
+  expect(w.calls.length).toBe(calls + 1)
+  expect(batchOf(w.calls[w.calls.length - 1])).toBeUndefined()
+  expect(seen(await ui.drawn())).not.toContain('▶')
+  expect((await command($, 'play stop')).text).toBe('Nothing is playing.')
+})
+
+test('a view pick stops the clip and draws that view', async ($, on) => {
+  const { w, ui } = await playing($, on)
+  await command($, 'view top')
+  await w.clock.advance(10)
+  const last = w.calls[w.calls.length - 1]
+  expect(batchOf(last)).toBeUndefined()
+  expect(paramsIn(last?.code ?? '').view).toBe('top')
+  expect(seen(await ui.drawn())).not.toContain('▶')
+})
+
+test('a one-frame range shows that frame and says there is nothing to play', async ($, on) => {
+  const { w, ui } = await playing($, on, { start: 5, end: 5, fps: 24 })
+  expect(w.toasts).toContain("Claude-Blender: the scene's frame range is a single frame; there is nothing to play.")
+  expect(seen(await ui.drawn())).not.toContain('▶')
+  expect((await command($, 'play stop')).text).toBe('Nothing is playing.')
+})
+
+test('a capture that fails shows why and plays nothing', async ($, on) => {
+  const w = world(on)
+  w.state.open = true
+  w.state.reply = async () => OFFLINE
+  const ui = await $.ui.mount(PANE as never)
+  await ui.drawn()
+  await command($, 'play')
+  await w.clock.advance(10)
+  expect(w.calls.length).toBe(1)
+  expect(seen(await ui.drawn())).toContain("Blender isn't reachable.")
+  expect((await command($, 'play stop')).text).toBe('Nothing is playing.')
+})
+
+test('a capture batch cut by the MCP layer is asked again at half the count', async ($, on) => {
+  const w = world(on)
+  w.state.open = true
+  const real = animated(w)
+  let cut = false
+  w.state.reply = async () => {
+    if (!cut) {
+      cut = true
+
+      return TRUNCATED
+    }
+
+    return real()
+  }
+  const ui = await $.ui.mount(PANE as never)
+  await ui.drawn()
+  await command($, 'play')
+  await w.clock.advance(10)
+  const [first, second] = w.calls.map(batchOf)
+  expect(second?.from).toBe(0)
+  expect(second?.count).toBe(Math.max(1, Math.floor((first?.count ?? 0) / 2)))
+  expect(seen(await ui.drawn())).toMatch(/▶ +1\/60/)
+})
+
+test('under Off the clip still moves: it was asked for', { options: { motion: 'off' } }, async ($, on) => {
+  const { w } = await playing($, on)
+  const before = w.blits.length
+  await w.clock.advance(1000)
+  expect(new Set(w.blits.slice(before).filter(b => b.key === 'blender-image').map(b => b.cells)).size).toBeGreaterThan(5)
+})
+
+test('closing the pane stops the clip, and opening it again draws the current frame', async ($, on) => {
+  const { w, ui: before } = await playing($, on)
+  await command($, 'close')
+  await before.unmount()
+  const calls = w.calls.length
+  await command($, '')
+  const ui = await $.ui.mount(PANE as never)
+  await ui.drawn()
+  await w.clock.advance(10)
+  expect(w.calls.length).toBe(calls + 1)
+  expect(batchOf(w.calls[w.calls.length - 1])).toBeUndefined()
 })

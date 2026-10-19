@@ -1,7 +1,7 @@
 {
   "name": "claudeblender",
   "version": "0.2.0",
-  "description": "A pane with a live low-res view of your Blender scene, redrawn in half-block pixels after every Blender edit Claude or a subagent makes, with motion effects and settings in /config",
+  "description": "A pane with a live low-res view of your Blender scene, redrawn in half-block pixels after every Blender edit Claude or a subagent makes, with an animation preview, motion effects and settings in /config",
   "author": { "name": "AndreaChiacchia", "url": "https://github.com/AndreaChiacchia" },
   "license": "MIT",
   "userConfig": {
@@ -32,6 +32,13 @@
       "description": "How the pane moves. lively: a new frame wipes in from the top behind a warm glint line, a soft shimmer drifts across the old frame while Blender draws, the dot spins ◐ ◓ ◑ ◒ every 0.2 s, the object count and draw time roll with the changed digits flashing, the name of the agent that made the edit pulses in its color, ✦ fresh twinkles for 2 s, and a failed draw pulses ✗ red. subtle: the wipe without the glint, a fainter shimmer, the spinner a step every second, softer pulses, a plain fresh. off: a still pane, each frame swapped in at once.",
       "default": "lively",
       "options": ["lively", "subtle", "off"]
+    },
+    "redraw": {
+      "type": "string",
+      "title": "Redraw on",
+      "description": "edits: an execute_blender_code call that only reads the scene (no bpy.ops, no assignment to an object's property, no call that can write) draws nothing; when in doubt it draws. every: every execute_blender_code call draws, as import_asset and generate_3d always do.",
+      "default": "edits",
+      "options": ["edits", "every"]
     },
     "server": {
       "type": "string",

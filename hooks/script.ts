@@ -7,6 +7,11 @@ export const MARK_END = '@@end@@'
 export const SUPERSAMPLE = 2
 /** A camera name is cut at this many characters before it travels. */
 export const MAX_CAM_NAME = 200
+/** An animation capture samples at most this many frames of the scene's range, however long it is. */
+export const MAX_CLIP_FRAMES = 240
+
+/** One batch of an animation capture: the range sampled down to `max` frames, of which `count` from `from`. */
+export type ClipParams = { max: number; from: number; count: number }
 
 export type ScriptParams = {
   maxW: number
@@ -15,13 +20,18 @@ export type ScriptParams = {
   /** The camera object to draw through when `view` is `object`; '' otherwise. */
   cam: string
   shading: 'solid' | 'material'
+  /** Present for an animation capture: the script then draws a batch of the scene's frames instead of the current one. */
+  clip?: ClipParams
 }
 
 const clampInt = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, Math.floor(n)))
 
-/** The parameters the script reads, clamped: sizes to 160 x 96 whole numbers, the camera name cut, `cam` empty unless `view` is `object`. */
-export function paramsOf(p: ScriptParams): Record<string, string | number> {
-  return {
+/**
+ * The parameters the script reads, clamped: sizes to 160 x 96 whole numbers, the camera name cut, `cam` empty unless `view`
+ * is `object`, and a capture's batch to whole numbers within `MAX_CLIP_FRAMES`.
+ */
+export function paramsOf(p: ScriptParams): Record<string, string | number | Record<string, number>> {
+  const params: Record<string, string | number | Record<string, number>> = {
     maxW: clampInt(p.maxW, 1, 160),
     maxH: clampInt(p.maxH, 1, 96),
     ss: SUPERSAMPLE,
@@ -29,6 +39,15 @@ export function paramsOf(p: ScriptParams): Record<string, string | number> {
     cam: p.view === 'object' ? Array.from(p.cam).slice(0, MAX_CAM_NAME).join('') : '',
     shading: p.shading,
   }
+  if (p.clip !== undefined) {
+    params.clip = {
+      max: clampInt(p.clip.max, 1, MAX_CLIP_FRAMES),
+      from: clampInt(p.clip.from, 0, MAX_CLIP_FRAMES),
+      count: clampInt(p.clip.count, 1, MAX_CLIP_FRAMES),
+    }
+  }
+
+  return params
 }
 
 /** The parameters as standard base64 of their UTF-8 JSON, so any camera name is safe inside the script's source. */
@@ -51,6 +70,10 @@ export function encodeParams(p: ScriptParams): string {
  * geometry; all of them compute their matrices here and never move the viewport or the scene camera. It assigns only two
  * viewport-space properties (`space.shading.type`, `space.overlay.show_overlays`), restored in `finally` within the same
  * call; it touches no scene, object or datablock and writes no file. The parameters travel as base64 JSON.
+ *
+ * With `clip`, it draws a batch of the scene's frame range instead, sampled down to `clip.max` frames: it sets each frame
+ * (`scene.frame_set`) and puts the current frame and subframe back in the same `finally`. A preset's framing is taken once,
+ * at the current frame, so the clip does not jitter; a camera view follows its camera through the frames.
  */
 export function renderScript(p: ScriptParams): string {
   return `import bpy, gpu, json, time, base64
@@ -90,10 +113,10 @@ def main():
     tail = {'cams': cams, 'active': active}
     kind = P['view']
     ss = P['ss']
+    C = P.get('clip')
     if kind in ('camera', 'object'):
         if kind == 'camera':
-            cam = scene.camera
-            if cam is None:
+            if scene.camera is None:
                 return out(dict({'ok': False, 'code': 'no-camera', 'message': ''}, **tail))
         else:
             cam = scene.objects.get(P['cam'])
@@ -101,24 +124,24 @@ def main():
                 return out(dict({'ok': False, 'code': 'no-such-camera', 'message': P['cam']}, **tail))
         aspect = (r.resolution_x * r.pixel_aspect_x) / (r.resolution_y * r.pixel_aspect_y)
         w, h = fit(aspect, P['maxW'], P['maxH'])
-        sw, sh = w * ss, h * ss
+    elif kind == 'viewport':
+        w, h = fit(reg.width / reg.height, P['maxW'], P['maxH'])
+    else:
+        w, h = P['maxW'], P['maxH']
+    sw, sh = w * ss, h * ss
+    def through():
+        cam = scene.camera if kind == 'camera' else scene.objects.get(P['cam'])
         view = cam.matrix_world.inverted()
         proj = cam.calc_matrix_camera(layer.depsgraph, x=sw, y=sh,
                                       scale_x=r.pixel_aspect_x, scale_y=r.pixel_aspect_y)
-    elif kind == 'viewport':
-        w, h = fit(reg.width / reg.height, P['maxW'], P['maxH'])
-        sw, sh = w * ss, h * ss
-        view = space.region_3d.view_matrix.copy()
-        proj = space.region_3d.window_matrix.copy()
-    else:
+        return view, proj
+    def framed():
         SKIP = {'CAMERA', 'LIGHT', 'LIGHT_PROBE', 'LIGHTPROBE', 'SPEAKER', 'EMPTY'}
         AXES = {
             'front': ((0, -1, 0), (1, 0, 0)), 'back': ((0, 1, 0), (-1, 0, 0)),
             'right': ((1, 0, 0), (0, 1, 0)), 'left': ((-1, 0, 0), (0, -1, 0)),
             'top': ((0, 0, 1), (1, 0, 0)), 'bottom': ((0, 0, -1), (1, 0, 0)),
         }
-        w, h = P['maxW'], P['maxH']
-        sw, sh = w * ss, h * ss
         pts = [ob.matrix_world @ Vector(c) for ob in scene.objects
                if ob.type not in SKIP and ob.visible_get(view_layer=layer) for c in ob.bound_box]
         if not pts:
@@ -144,30 +167,69 @@ def main():
                        (rr.z, u.z, b.z, eye.z), (0, 0, 0, 1))).inverted()
         proj = Matrix(((1 / hw, 0, 0, 0), (0, 1 / hh, 0, 0),
                        (0, 0, -2 / (f - n), -(f + n) / (f - n)), (0, 0, 0, 1)))
+        return view, proj
+    if kind in ('camera', 'object'):
+        fixed = None
+    elif kind == 'viewport':
+        fixed = (space.region_3d.view_matrix.copy(), space.region_3d.window_matrix.copy())
+    else:
+        fixed = framed()
+    def shot(off):
+        view, proj = fixed or through()
+        off.draw_view3d(scene, layer, space, reg, view, proj, do_color_management=True)
+        buf = off.texture_color.read()
+        buf.dimensions = sw * sh * 4
+        try:
+            a = np.asarray(buf)
+            isf = a.dtype.kind == 'f'
+            a = a.astype(np.float32).reshape(-1)
+            if a.size != sw * sh * 4:
+                raise ValueError
+        except Exception:
+            a = np.asarray(buf.to_list(), dtype=np.float32)
+            isf = bool(a.size) and a.max() <= 1.0001
+        if isf:
+            a = a * 255.0
+        a = a.reshape(sh, sw, 4)[::-1, :, :3]
+        a = a.reshape(h, ss, w, ss, 3).mean(axis=(1, 3))
+        return np.clip(np.rint(a), 0, 255).astype(np.uint8).tobytes()
+    b64 = lambda raw: base64.b64encode(raw).decode('ascii')
+    if C:
+        f0 = scene.frame_start
+        f1 = max(f0, scene.frame_end)
+        step = max(1, -(-(f1 - f0 + 1) // C['max']))
+        todo = list(range(f0, f1 + 1, step))
+        total = len(todo)
+        todo = todo[C['from']:C['from'] + C['count']]
     t0 = time.perf_counter()
     old_type, old_ov = space.shading.type, space.overlay.show_overlays
+    old_f, old_sub = scene.frame_current, scene.frame_subframe
     off = gpu.types.GPUOffScreen(sw, sh)
+    shots = []
     try:
         space.shading.type = 'SOLID' if P['shading'] == 'solid' else 'MATERIAL'
         space.overlay.show_overlays = False
-        off.draw_view3d(scene, layer, space, reg, view, proj, do_color_management=True)
-        buf = off.texture_color.read()
+        if C:
+            for fr in todo:
+                scene.frame_set(fr)
+                shots.append({'n': fr, 'rgb': b64(shot(off))})
+        else:
+            rgb = shot(off)
     finally:
         space.shading.type = old_type
         space.overlay.show_overlays = old_ov
         off.free()
-    buf.dimensions = sw * sh * 4
-    a = np.asarray(buf.to_list(), dtype=np.float32)
-    if a.size and a.max() <= 1.0001:
-        a = a * 255.0
-    a = a.reshape(sh, sw, 4)[::-1, :, :3]
-    a = a.reshape(h, ss, w, ss, 3).mean(axis=(1, 3))
-    rgb = np.clip(np.rint(a), 0, 255).astype(np.uint8).tobytes()
-    out({'ok': True, 'w': w, 'h': h, 'rgb': base64.b64encode(rgb).decode('ascii'),
-         'scene': scene.name, 'objects': len(scene.objects),
-         'ms': int((time.perf_counter() - t0) * 1000),
-         'blender': bpy.app.version_string, 'view': kind, 'cam': P['cam'],
-         'cams': cams, 'active': active})
+        if C:
+            scene.frame_set(old_f, subframe=old_sub)
+    meta = {'scene': scene.name, 'objects': len(scene.objects),
+            'ms': int((time.perf_counter() - t0) * 1000),
+            'blender': bpy.app.version_string, 'view': kind, 'cam': P['cam'],
+            'cams': cams, 'active': active}
+    if C:
+        return out(dict({'ok': True, 'clip': True, 'w': w, 'h': h, 'frames': shots, 'total': total,
+                         'from': C['from'], 'step': step, 'start': f0, 'end': f1,
+                         'fps': r.fps / r.fps_base}, **meta))
+    out(dict({'ok': True, 'w': w, 'h': h, 'rgb': b64(rgb)}, **meta))
 try:
     main()
 except Exception as ex:

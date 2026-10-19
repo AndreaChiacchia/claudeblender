@@ -13,6 +13,8 @@ export type Settings = {
   view: PresetId
   shading: 'solid' | 'material'
   motion: Motion
+  /** `edits`: an `execute_blender_code` call that only reads draws nothing. `every`: every such call draws. */
+  redraw: 'edits' | 'every'
   server: string
 }
 
@@ -64,6 +66,41 @@ export type Reply =
       active: string
     }
   | { kind: 'fail'; code: FailCode; message: string; cams?: string[]; active?: string }
+
+/** One batch of an animation capture, as Blender answered it. */
+export type ClipReply =
+  | {
+      kind: 'clip'
+      w: number
+      h: number
+      /** The scene frames of this batch, in order, each with its picture. */
+      frames: Array<{ n: number; rgb: Uint8Array }>
+      /** The sampled frames of the whole range, of which this batch is a part, and where it starts among them. */
+      total: number
+      from: number
+      /** Every `step`-th scene frame is sampled, from `start` to `end`. */
+      step: number
+      start: number
+      end: number
+      /** The scene's frame rate (fps / fps_base). */
+      fps: number
+      scene: string
+      objects: number
+      ms: number
+      view: ViewKind
+      cam: string
+      cams: string[]
+      active: string
+    }
+  | Extract<Reply, { kind: 'fail' }>
+
+/** A captured animation the pane loops: its pictures, the scene frames they are, and how long each shows (ms). */
+export type Clip = {
+  frames: Array<{ n: number; pixels: Pixels }>
+  start: number
+  end: number
+  frameMs: number
+}
 
 /** A picture: `w * h` pixels of r, g, b bytes, row-major, top row first. */
 export type Pixels = { w: number; h: number; rgb: Uint8Array }

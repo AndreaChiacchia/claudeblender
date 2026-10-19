@@ -275,7 +275,18 @@ const space = (): Cell => ({ cp: 0x20, fg: DEFAULT, bg: DEFAULT })
  * One placed caption piece as cells: a rolling figure with its changed digits flashing, or the agent label pulsing. The rolled
  * figure is used only while it takes as many digits as the placed one, so a roll never spills into the next cell.
  */
-function itemCells(m: PaneMotion, seg: Placed, level: Motion): Cell[] {
+function itemCells(m: PaneMotion, seg: Placed, level: Motion, playFrame: number | null): Cell[] {
+  if (seg.role === 'play') {
+    // The frame number is swapped in at the placed width; the piece is laid out for the range's last frame.
+    const parts = /^(\S+ )( *\d+)(.*)$/.exec(seg.text)
+    const digits = parts?.[2]
+    const text =
+      parts === null || digits === undefined || playFrame === null || String(playFrame).length > digits.length
+        ? seg.text
+        : (parts[1] ?? '') + String(playFrame).padStart(digits.length) + (parts[3] ?? '')
+
+    return textCells(text, seg.fg)
+  }
   if (seg.role === 'objects' || seg.role === 'ms') {
     const o = seg.role === 'objects' ? m.objects : m.ms
     const digits = /^\d+/.exec(seg.text)?.[0]
@@ -306,10 +317,17 @@ function itemCells(m: PaneMotion, seg: Placed, level: Motion): Cell[] {
 
 /**
  * The caption at `m.tick` as `cols * layout.lines` cells, row-major, from spaces: the state dot at line 0, column 1, each
- * placed piece at its place; then, only where it fits after the last piece (two spaces apart), the fresh badge. The badge never
- * adds a line or moves a piece.
+ * placed piece at its place (a playing clip's piece showing `playFrame`); then, only where it fits after the last piece (two
+ * spaces apart), the fresh badge. The badge never adds a line or moves a piece.
  */
-export function composeCaption(m: PaneMotion, layout: CaptionLayout, dot: DotState, cols: number, level: Motion): Cell[] {
+export function composeCaption(
+  m: PaneMotion,
+  layout: CaptionLayout,
+  dot: DotState,
+  cols: number,
+  level: Motion,
+  playFrame: number | null = null,
+): Cell[] {
   const out: Cell[] = Array.from({ length: cols * layout.lines }, space)
   const put = (line: number, col: number, cells: Cell[]): void => {
     cells.forEach((cell, i) => {
@@ -317,7 +335,7 @@ export function composeCaption(m: PaneMotion, layout: CaptionLayout, dot: DotSta
     })
   }
   put(0, 1, [dotCell(m, dot, level)])
-  for (const item of layout.items) put(item.line, item.col, itemCells(m, item, level))
+  for (const item of layout.items) put(item.line, item.col, itemCells(m, item, level, playFrame))
   const badge = m.badge
   if (level !== 'off' && badge !== null && m.tick < badge.start + BADGE_FRAMES) {
     const text =

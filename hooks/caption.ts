@@ -90,8 +90,16 @@ export function shortOf(message: string): string {
   return cut(message, MAX_SHORT)
 }
 
-/** A piece of the caption: its text and color; `role` marks the pieces the motion changes. */
-export type Segment = { text: string; fg: number; role?: 'by' | 'objects' | 'ms' }
+/** A piece of the caption: its text and color; `role` marks the pieces the motion changes (`play`: the clip's frame number). */
+export type Segment = { text: string; fg: number; role?: 'by' | 'objects' | 'ms' | 'play' }
+
+/** Marks the playing clip's piece. */
+export const PLAY_MARK = '▶'
+
+/** The playing clip's piece: `▶ 25/60`, the frame number padded to the width of the last frame's so the piece never moves. */
+export function playText(frame: number, end: number): string {
+  return `${PLAY_MARK} ${String(frame).padStart(String(end).length)}/${end}`
+}
 
 export type CaptionInput = {
   scene: string
@@ -105,6 +113,8 @@ export type CaptionInput = {
   errorMessage: string | null
   /** Minutes east of UTC, for the clock. */
   offsetMin: number
+  /** `/blender play`: the clip looping (the frame showing and the range's last), or a capture with `got` of `total` frames. */
+  play?: { kind: 'playing'; frame: number; end: number } | { kind: 'capturing'; got: number; total: number | null } | null
 }
 
 /** The caption under the picture as pieces; the layout adds the separators between them. */
@@ -116,12 +126,18 @@ export function captionSegments(input: CaptionInput): Segment[] {
       { text: `last frame ${time}`, fg: PLAIN },
     ]
   }
-  const out: Segment[] = [
-    { text: cut(input.scene, MAX_SCENE), fg: LIVE },
+  const out: Segment[] = [{ text: cut(input.scene, MAX_SCENE), fg: LIVE }]
+  const play = input.play ?? null
+  if (play !== null && play.kind === 'playing') {
+    out.push({ text: playText(play.frame, play.end), fg: LIVE, role: 'play' })
+  } else if (play !== null) {
+    out.push({ text: `capturing ${play.got}/${play.total ?? '…'}`, fg: PLAIN })
+  }
+  out.push(
     { text: `${input.objects} obj`, fg: PLAIN, role: 'objects' },
     { text: `${input.ms} ms`, fg: PLAIN, role: 'ms' },
     { text: time, fg: PLAIN },
-  ]
+  )
   if (input.by !== null) {
     out.push({
       text: `by ${input.by.label}` + (input.by.others > 0 ? ` +${input.by.others}` : ''),

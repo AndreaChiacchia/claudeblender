@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { decodeBase64, parseReply } from '../hooks/reply'
+import { decodeBase64, parseClip, parseReply } from '../hooks/reply'
 import { MARK_BEGIN, MARK_END } from '../hooks/script'
 
 const bytesToB64 = (bytes: number[]): string => btoa(String.fromCharCode(...bytes))
@@ -119,4 +119,52 @@ test('each ok:false code of the script, and an unknown one as error', () => {
 test('decodeBase64 round-trips the bytes 0..255', () => {
   const all = Array.from({ length: 256 }, (_, i) => i)
   expect(Array.from(decodeBase64(bytesToB64(all)))).toEqual(all)
+})
+
+const CLIP = {
+  ok: true,
+  clip: true,
+  w: 2,
+  h: 1,
+  frames: [
+    { n: 1, rgb: bytesToB64([1, 2, 3, 4, 5, 6]) },
+    { n: 6, rgb: bytesToB64([7, 8, 9, 10, 11, 12]) },
+  ],
+  total: 12,
+  from: 0,
+  step: 5,
+  start: 1,
+  end: 60,
+  fps: 24,
+  scene: 'Scene',
+  objects: 3,
+  ms: 80,
+  view: 'iso',
+}
+
+test('a capture batch: its frames in order, where it sits in the range, and the frame rate', () => {
+  const reply = parseClip(text(JSON.stringify({ result: 'Code executed successfully: ' + line(CLIP) + '\n' })))
+  expect(reply.kind).toBe('clip')
+  if (reply.kind !== 'clip') return
+  expect(reply.frames.map(f => f.n)).toEqual([1, 6])
+  expect(Array.from(reply.frames[1]?.rgb ?? [])).toEqual([7, 8, 9, 10, 11, 12])
+  expect([reply.w, reply.h, reply.total, reply.from, reply.step, reply.start, reply.end, reply.fps]).toEqual([2, 1, 12, 0, 5, 1, 60, 24])
+  expect([reply.scene, reply.objects, reply.view]).toEqual(['Scene', 3, 'iso'])
+})
+
+test('a capture batch with one bad frame, or a single-frame answer, is bad-reply', () => {
+  const bad = { kind: 'fail', code: 'bad-reply', message: '' }
+  expect(parseClip(text(line({ ...CLIP, frames: [{ n: 1, rgb: bytesToB64([1, 2, 3]) }] })))).toEqual(bad)
+  expect(parseClip(text(line({ ...CLIP, frames: [{ n: 1.5, rgb: bytesToB64([1, 2, 3, 4, 5, 6]) }] })))).toEqual(bad)
+  expect(parseClip(text(line({ ...CLIP, fps: 0 })))).toEqual(bad)
+  expect(parseClip(text(line(FRAME)))).toEqual(bad)
+})
+
+test('a capture shares the failures of a draw', () => {
+  expect(parseClip(text(MARK_BEGIN + '{"ok":true,"clip":true,"frames":[{"n":1,"rgb":"AAAA'))).toEqual({
+    kind: 'fail',
+    code: 'truncated',
+    message: '',
+  })
+  expect(parseClip(text(line({ ok: false, code: 'no-camera', message: '' })))).toEqual({ kind: 'fail', code: 'no-camera', message: '' })
 })

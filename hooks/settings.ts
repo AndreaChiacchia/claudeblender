@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: Settings = {
   view: 'viewport',
   shading: 'solid',
   motion: 'lively',
+  redraw: 'edits',
   server: 'blender',
 }
 
@@ -21,6 +22,7 @@ export function normalizeSettings(options: Record<string, unknown>): Settings {
     view: pick(options.view, PRESET_IDS, DEFAULT_SETTINGS.view),
     shading: pick(options.shading, ['solid', 'material'] as const, DEFAULT_SETTINGS.shading),
     motion: pick<Motion>(options.motion, ['lively', 'subtle', 'off'], DEFAULT_SETTINGS.motion),
+    redraw: pick(options.redraw, ['edits', 'every'] as const, DEFAULT_SETTINGS.redraw),
     server: String(options.server ?? '').trim() || 'blender',
   }
 }
