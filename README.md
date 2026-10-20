@@ -1,6 +1,6 @@
 # Claude-Blender
 
-![version](https://img.shields.io/badge/version-0.3.0-blue)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
 
 A mod for the Claude Code CLI that keeps a pane with a live, low-res picture of your Blender scene. You stay in the terminal while Claude, or a subagent, edits the scene through the Blender MCP: each edit redraws the picture a moment later, with the name of the agent that made it, and the pane moves while it does.
 
