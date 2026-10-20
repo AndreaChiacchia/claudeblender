@@ -5,7 +5,7 @@ export const DEFAULT = 0x01000000
 export const TRACK = 0x585858
 /** The scene name, the live dot, the main loop's color: the siblings' lavender. */
 export const LIVE = 0xafafd7
-/** The shimmer target. */
+/** The rendering glow's target. */
 export const WHITE = 0xffffff
 /** Plain caption text, the refresh label: claudepeeker's gray. */
 export const PLAIN = 0x8a8a8a

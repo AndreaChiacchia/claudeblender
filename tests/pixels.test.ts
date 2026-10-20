@@ -2,17 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { DEFAULT, HALF_TOP, INK_DARK, WHITE, mixColor } from '../hooks/cells'
 import type { Cell } from '../hooks/cells'
-import {
-  SHIMMER_RADIUS,
-  SHIMMER_SPEED,
-  boxFor,
-  dimCells,
-  fitSize,
-  halfBlockCells,
-  placeFrame,
-  scaleNearest,
-  shimmerCells,
-} from '../hooks/pixels'
+import { boxFor, dimCells, fitSize, glowCells, halfBlockCells, placeFrame, scaleNearest } from '../hooks/pixels'
 import type { Pixels } from '../types'
 
 /** A picture from colors given as 0xRRGGBB, row-major. */
@@ -71,29 +61,22 @@ test('boxFor keeps the reserved rows for the caption and the chips, and clamps',
   expect(boxFor(2, 1, 4)).toEqual({ cols: 8, rows: 3 })
 })
 
-test('the shimmer is gain at the band center, fades to nothing at a distance of 8, and never rises in between', () => {
-  const cols = 40
-  const black: Cell[] = Array.from({ length: cols }, () => ({ cp: HALF_TOP, fg: 0x000000, bg: 0x000000 }))
-  // The smallest whole tick that puts the head at 20: head = (tick * SHIMMER_SPEED) % (cols + 2 * rows + 2 * SHIMMER_RADIUS) - SHIMMER_RADIUS,
-  // with one row of cells here (SHIMMER_SPEED 5: tick 52, as 52 * 5 % 58 - 8 = 20).
-  const period = cols + 2 * 1 + 2 * SHIMMER_RADIUS
-  let tick = 0
-  while (tick < period && (tick * SHIMMER_SPEED) % period - SHIMMER_RADIUS !== 20) tick++
-  expect((tick * SHIMMER_SPEED) % period - SHIMMER_RADIUS).toBe(20)
-  const lit = shimmerCells(black, cols, tick, 0.5)
-  const at = (distance: number): number => lit[20 + distance]?.fg ?? -1
-  expect(at(0)).toBe(mixColor(0x000000, WHITE, 0.5))
-  expect(lit[28]).toBe(black[28])
-  expect(lit[12]).toBe(black[12])
-  const levels = [0, 2, 4, 6, 8].map(at)
-  for (let i = 1; i < levels.length; i++) expect(levels[i] ?? 0).toBeLessThan(levels[i - 1] ?? 0)
-  // The same on the other side of the center.
-  expect(lit[20 - 4]?.fg).toBe(lit[20 + 4]?.fg)
+test('the glow lightens every picture cell alike toward white, and keeps blanks and a missing bottom pixel', () => {
+  const blank: Cell = { cp: 0x20, fg: DEFAULT, bg: DEFAULT }
+  const cells: Cell[] = [
+    { cp: HALF_TOP, fg: 0x000000, bg: 0x000000 },
+    { cp: HALF_TOP, fg: 0x204060, bg: DEFAULT },
+    blank,
+  ]
+  const lit = glowCells(cells, 0.5)
+  expect(lit[0]).toEqual({ cp: HALF_TOP, fg: mixColor(0x000000, WHITE, 0.5), bg: mixColor(0x000000, WHITE, 0.5) })
+  expect(lit[1]).toEqual({ cp: HALF_TOP, fg: mixColor(0x204060, WHITE, 0.5), bg: DEFAULT })
+  expect(lit[2]).toEqual(blank)
 })
 
-test('the shimmer with no gain changes nothing', () => {
+test('the glow with no amount returns the cells as they are', () => {
   const cells: Cell[] = Array.from({ length: 12 }, () => ({ cp: HALF_TOP, fg: 0x336699, bg: 0x112233 }))
-  expect(shimmerCells(cells, 4, 7, 0)).toEqual(cells)
+  expect(glowCells(cells, 0)).toBe(cells)
 })
 
 test('placeFrame refits when the box shrank or grew, and keeps a frame that touches a limit', () => {

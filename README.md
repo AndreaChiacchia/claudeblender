@@ -25,8 +25,8 @@ A mod for the Claude Code CLI that keeps a pane with a live, low-res picture of 
 - **The caption:** a state dot, the scene name, the object count, the draw time in ms, the time of the frame and who made the edit. On a narrow pane it wraps between its pieces onto up to three lines, starting flush under the first piece, instead of cutting.
 - **States:** the empty pane (`○ No frame yet.`), drawing (a spinning `◐ ◓ ◑ ◒`, the held picture dimmed), stale (`◌`, the picture dimmed while edits wait), idle (`●`) and failed (`✗` in red with the reason, the last picture kept dimmed). After a failure nothing is retried until the next edit or `/blender refresh`.
 - **Motion** (setting `motion`): Lively (default), Subtle or Off.
-  - **Lively:** a new frame wipes in from the top behind a warm glint line; a soft shimmer drifts across the held frame while Blender draws; the dot spins every 0.2 s; the object count and draw time roll to their new values with the changed digits flashing; the agent's name pulses three times in its color; `✦ fresh` twinkles for 2 s; a failed draw pulses the `✗` red.
-  - **Subtle:** the wipe without the glint, a fainter shimmer, the spinner a step every second, softer pulses and a plain `fresh`.
+  - **Lively:** a new frame wipes in behind a warm glint line, from the top and from the left by turns; the held frame gently brightens and darkens while Blender draws; the dot spins every 0.2 s; the object count and draw time roll to their new values with the changed digits flashing; the agent's name pulses three times in its color; `✦ fresh` twinkles for 2 s; a failed draw pulses the `✗` red.
+  - **Subtle:** the wipe without the glint, a fainter glow, the spinner a step every second, softer pulses and a plain `fresh`.
   - **Off:** a still pane, each frame swapped in at once.
 - **Animation preview:** `/blender play` captures the scene's frame range, sampled down to at most 48 frames, and loops it in the pane in real time at the scene's frame rate, with `▶ 25/60` in the caption. The capture is a few Blender calls; the loop makes none. An edit, a view pick, `/blender refresh`, closing the pane or `/blender play stop` ends it and draws the current frame. Resizing the pane rescales the clip without capturing it again.
 - **A demo:** `/blender demo` plays a 14-second tour of the effects with made-up frames, three agents and a failed draw, with Blender closed and untouched.
@@ -72,7 +72,7 @@ Set them in `/config`, or in settings under `pluginConfigs.claudeblender`. A cha
 | `autoOpen` | `on`, `off` | on: the pane opens on the first edit by Claude or a subagent / off: only `/blender` opens it |
 | `view` | `viewport`, `camera`, `top`, `bottom`, `front`, `back`, `left`, `right`, `iso` | the view each session starts with; the chips and `/blender view` change it for the session only. viewport: what the largest 3D Viewport shows, at its shape / camera: through the scene camera, at the render resolution's shape / the rest: straight-on orthographic views framed on the scene, and a three-quarter view |
 | `shading` | `solid`, `material` | Solid shading, fast and clear / Material Preview, the scene's real colors, slower |
-| `motion` | `lively`, `subtle`, `off` | wipe, shimmer, spinner, rolling figures and pulses / the same, softer / still (a `/blender play` loop moves under every level) |
+| `motion` | `lively`, `subtle`, `off` | wipe, glow, spinner, rolling figures and pulses / the same, softer / still (a `/blender play` loop moves under every level) |
 | `redraw` | `edits`, `every` | an `execute_blender_code` call that only reads draws nothing; when in doubt it draws / every call draws |
 | `server` | `blender` | the name of the Blender MCP server as `/mcp` lists it |
 
@@ -86,7 +86,7 @@ Set them in `/config`, or in settings under `pluginConfigs.claudeblender`. A cha
 - **The views:** the preset views are orthographic and framed on the visible objects of the scene (a 2 m cube at the origin when there is none), like Blender's numpad views. A camera view draws through that camera object without making it the scene's active camera. The matrices are computed in the script, so Blender's own viewport and its active camera never move. The list of cameras (at most 24) arrives with each draw.
 - **What it changes and restores:** two viewport-space properties, the viewport's shading type and its overlays, are set for the draw and put back in a `finally` within the same call. A capture also sets the scene's current frame and puts the frame and subframe back in that `finally`. No object, material or render setting is touched, no datablock is created and nothing is written to disk.
 - **The picture:** one cell is one `▀`, two pixels tall, so a pane 72 columns wide takes at most 72 by 40 pixels. The view is drawn for the pane's size and redrawn once, after a short wait, when the pane is resized.
-- **Painting:** the picture and the caption are Raster cell grids. They are repainted up to 20 times a second while something moves (the wipe, a rolling figure, a pulse, a draw in flight) and not at all otherwise. Only the pieces that changed are sent, the picture at 10 frames a second while only the shimmer moves it. Effects never start a Blender call.
+- **Painting:** the picture and the caption are Raster cell grids. They are repainted up to 20 times a second while something moves (the wipe, a rolling figure, a pulse, a draw in flight) and not at all otherwise. Only the pieces that changed are sent, the picture at 10 frames a second while only the glow moves it. Effects never start a Blender call.
 - **No Blender call** is made while the pane is not open and shown.
 
 ## Limitations
@@ -118,7 +118,7 @@ claude plugin test .
 | `hooks/reply.ts` | Blender's answer parsed into a frame, a capture batch or a failure |
 | `hooks/edits.ts` | whether an `execute_blender_code` script may change the scene |
 | `hooks/schedule.ts` | the debounce, the coalescing, the single flight and who edited |
-| `hooks/pixels.ts` | the picture's geometry, half blocks, the stale dim and the shimmer |
+| `hooks/pixels.ts` | the picture's geometry, half blocks, the stale dim and the glow |
 | `hooks/caption.ts` | the caption and its wrapping, agent labels and colors, the failure texts |
 | `hooks/motion.ts` | the pane's motion: what changed, the effects, each frame |
 | `hooks/settings.ts` | the settings and the tool-name prefix |

@@ -4,6 +4,8 @@ import { DEFAULT, GLINT_UP, HALF_TOP, INK_DARK, LIVE, PLAIN, lighten, mixColor }
 import type { Cell } from '../hooks/cells'
 import {
   BADGE_FRAMES,
+  GLOW_FRAMES,
+  GLOW_GAIN,
   PULSE_COUNT,
   PULSE_PROFILE,
   WIPE_FRAMES,
@@ -12,6 +14,7 @@ import {
   composeImage,
   createPaneMotion,
   dotCell,
+  glowAmount,
   isActive,
   observeError,
   observeFrame,
@@ -19,7 +22,7 @@ import {
 import type { PaneMotion } from '../hooks/motion'
 import { layoutCaption } from '../hooks/caption'
 import type { Segment } from '../hooks/caption'
-import { SHIMMER_GAIN, dimCells, shimmerCells } from '../hooks/pixels'
+import { dimCells, glowCells } from '../hooks/pixels'
 import type { Motion } from '../types'
 
 /** The caption of `pieces` in `cols` columns, laid out and composed. */
@@ -41,8 +44,18 @@ function second(level: Motion = 'lively', old: Cell[] | null = null, objects = 3
   return m
 }
 
-const ticks = (m: PaneMotion, n: number): void => {
-  for (let i = 0; i < n; i++) advance(m)
+/** A pane that has taken a first frame silently, then sees a second and a third over `old`: the third wipes right. */
+function third(level: Motion = 'lively', old: Cell[] | null = null): PaneMotion {
+  const m = createPaneMotion()
+  observeFrame(m, frame(1), null, level)
+  observeFrame(m, frame(2), old, level)
+  observeFrame(m, frame(3), old, level)
+
+  return m
+}
+
+const ticks = (m: PaneMotion, n: number, isRendering = false): void => {
+  for (let i = 0; i < n; i++) advance(m, isRendering)
 }
 
 const STATE = { isStale: false, isRendering: false }
@@ -58,7 +71,7 @@ test('the first frame is taken silently', () => {
 
 test('the next frame starts the wipe, the agent pulse and the fresh badge', () => {
   const m = second()
-  expect(m.wipe).toEqual({ start: 0, old: null })
+  expect(m.wipe).toEqual({ start: 0, old: null, dir: 'down' })
   expect(m.pulse).toEqual({ start: 0 })
   expect(m.badge).toEqual({ start: 0 })
   expect(isActive(m, false, 'lively')).toBe(true)
@@ -118,6 +131,76 @@ test('Subtle: the wipe has no glint row; with no old picture there is no wipe', 
   expect(composeImage(none, base, cols, rows, STATE, 'lively')).toEqual(base)
 })
 
+test('the wipe alternates down and right, and a wipe with no old picture takes no turn', () => {
+  const old = solid(12, OLD)
+  const m = second('lively', old)
+  expect(m.wipe?.dir).toBe('down')
+  expect(m.nextWipe).toBe('right')
+  observeFrame(m, frame(3), old, 'lively')
+  expect(m.wipe?.dir).toBe('right')
+  observeFrame(m, frame(4), old, 'lively')
+  expect(m.wipe?.dir).toBe('down')
+  const fresh = createPaneMotion()
+  observeFrame(fresh, frame(1), null, 'lively')
+  observeFrame(fresh, frame(2), null, 'lively')
+  expect(fresh.nextWipe).toBe('down')
+  observeFrame(fresh, frame(3), old, 'lively')
+  expect(fresh.wipe?.dir).toBe('down')
+})
+
+test('the left-to-right wipe: new columns left of the head, a glint column at the head, old columns right of it', () => {
+  const cols = 6
+  const rows = 2
+  const old = solid(cols * rows, OLD)
+  const base = solid(cols * rows, NEW)
+  const m = third('lively', old)
+  ticks(m, 2)
+  // Frame 2: the head is column 0 + floor(3 * 6 / 6) - 1 = 2.
+  const cells = composeImage(m, base, cols, rows, STATE, 'lively')
+  const glint = mixColor(NEW, GLINT_UP, 0.35)
+  for (let y = 0; y < rows; y++) {
+    const row = cells.slice(y * cols, (y + 1) * cols)
+    expect(row.slice(0, 2).every(c => c.fg === NEW)).toBe(true)
+    expect(row[2]?.fg).toBe(glint)
+    expect(row[2]?.bg).toBe(glint)
+    expect(row.slice(3).every(c => c.fg === OLD)).toBe(true)
+  }
+  ticks(m, 4)
+  expect(composeImage(m, base, cols, rows, STATE, 'lively')).toEqual(base)
+})
+
+test("the left-to-right wipe runs over the picture's columns, not the blanks around it", () => {
+  const cols = 8
+  const rows = 1
+  const blank: Cell = { cp: 0x20, fg: DEFAULT, bg: DEFAULT }
+  const picture = (c: number): Cell[] =>
+    Array.from({ length: cols }, (_, x) => (x >= 2 && x <= 5 ? { cp: HALF_TOP, fg: c, bg: c } : blank))
+  const old = picture(OLD)
+  const base = picture(NEW)
+  const m = third('lively', old)
+  ticks(m, 2)
+  // The picture spans columns 2-5: the head is 2 + floor(3 * 4 / 6) - 1 = 3.
+  const cells = composeImage(m, base, cols, rows, STATE, 'lively')
+  expect(cells[2]?.fg).toBe(NEW)
+  expect(cells[3]?.fg).toBe(mixColor(NEW, GLINT_UP, 0.35))
+  expect(cells[4]?.fg).toBe(OLD)
+  expect(cells[5]?.fg).toBe(OLD)
+  for (const x of [0, 1, 6, 7]) expect(cells[x]).toEqual(base[x])
+})
+
+test('Subtle: the left-to-right wipe has no glint column', () => {
+  const cols = 6
+  const rows = 2
+  const m = third('subtle', solid(cols * rows, OLD))
+  ticks(m, 2)
+  const cells = composeImage(m, solid(cols * rows, NEW), cols, rows, STATE, 'subtle')
+  for (let y = 0; y < rows; y++) {
+    const row = cells.slice(y * cols, (y + 1) * cols)
+    expect(row.slice(0, 3).every(c => c.fg === NEW)).toBe(true)
+    expect(row.slice(3).every(c => c.fg === OLD)).toBe(true)
+  }
+})
+
 test('the stale dim is 0.2 toward the ink, in every level', () => {
   const base = solid(4, 0x808080)
   const m = createPaneMotion()
@@ -126,27 +209,38 @@ test('the stale dim is 0.2 toward the ink, in every level', () => {
   expect(composeImage(m, base, 2, 2, STATE, 'off')).toEqual(base)
 })
 
-test('the shimmer drifts in Lively and Subtle (fainter), not in Off, and only near its band', () => {
-  const cols = 20
+test('the glow brightens the whole dimmed frame and darkens it back while Blender draws, fainter in Subtle, not in Off', () => {
+  const cols = 4
   const rows = 2
   const base = solid(cols * rows, 0x808080)
-  const m = createPaneMotion()
-  ticks(m, 3)
   const state = { isStale: false, isRendering: true }
   const dimmed = dimCells(base, 0.2)
+  const near = (x: number, v: number): boolean => Math.abs(x - v) < 1e-9
+  expect(GLOW_FRAMES).toBe(32)
+  expect(GLOW_GAIN).toEqual({ lively: 0.12, subtle: 0.06 })
+  const m = createPaneMotion()
+  expect(m.glowStart).toBeNull()
+  expect(glowAmount(m, 'lively')).toBe(0)
+  expect(composeImage(m, base, cols, rows, state, 'lively')).toEqual(dimmed)
+  ticks(m, 1, true)
+  expect(m.glowStart).toBe(m.tick)
+  expect(glowAmount(m, 'lively')).toBe(0)
+  ticks(m, GLOW_FRAMES / 2, true)
+  expect(near(glowAmount(m, 'lively'), 0.12)).toBe(true)
+  expect(near(glowAmount(m, 'subtle'), 0.06)).toBe(true)
+  expect(glowAmount(m, 'off')).toBe(0)
   const lively = composeImage(m, base, cols, rows, state, 'lively')
   const subtle = composeImage(m, base, cols, rows, state, 'subtle')
-  expect(lively).toEqual(shimmerCells(dimmed, cols, m.tick, SHIMMER_GAIN.lively))
-  expect(subtle).toEqual(shimmerCells(dimmed, cols, m.tick, SHIMMER_GAIN.subtle))
-  expect(composeImage(m, base, cols, rows, state, 'off')).toEqual(dimmed)
-  // Tick 3: the head is at 3 * 5 % (20 + 4 + 16) - 8 = 7; cell (19, 1) is 14 steps away, beyond the radius of 8.
-  const changed = lively.filter((c, i) => c.fg !== dimmed[i]?.fg)
-  expect(changed.length).toBeGreaterThan(0)
-  expect(changed.length).toBeLessThan(lively.length)
-  expect(lively[cols * rows - 1]).toEqual(dimmed[cols * rows - 1])
-  // Subtle's band is fainter than Lively's wherever it shows.
-  expect(SHIMMER_GAIN).toEqual({ lively: 0.17, subtle: 0.09 })
+  expect(lively).toEqual(glowCells(dimmed, glowAmount(m, 'lively')))
+  expect(subtle).toEqual(glowCells(dimmed, glowAmount(m, 'subtle')))
+  expect(new Set(lively.map(c => c.fg)).size).toBe(1)
+  expect((lively[0]?.fg ?? 0) > (dimmed[0]?.fg ?? 0)).toBe(true)
   expect((subtle[0]?.fg ?? 0) <= (lively[0]?.fg ?? 0)).toBe(true)
+  expect(composeImage(m, base, cols, rows, state, 'off')).toEqual(dimmed)
+  ticks(m, GLOW_FRAMES / 2, true)
+  expect(near(glowAmount(m, 'lively'), 0)).toBe(true)
+  ticks(m, 1, false)
+  expect(m.glowStart).toBeNull()
 })
 
 test('the dot spins every 4 frames in Lively and every 20 in Subtle, and is still in Off', () => {
@@ -157,7 +251,7 @@ test('the dot spins every 4 frames in Lively and every 20 in Subtle, and is stil
   for (let i = 0; i < 40; i++) {
     lively.push(cp(m, 'lively'))
     subtle.push(cp(m, 'subtle'))
-    advance(m)
+    advance(m, false)
   }
   expect(lively.slice(0, 4)).toEqual([0x25d0, 0x25d0, 0x25d0, 0x25d0])
   expect(lively[4]).toBe(0x25d3)

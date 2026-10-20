@@ -24,9 +24,9 @@ import {
 } from './cells'
 import type { Cell } from './cells'
 import type { CaptionLayout, Placed } from './caption'
-import { SHIMMER_GAIN, STALE_DIM, dimCells, shimmerCells } from './pixels'
+import { STALE_DIM, dimCells, glowCells } from './pixels'
 
-export { SHIMMER_GAIN, SHIMMER_RADIUS, SHIMMER_SPEED, STALE_DIM } from './pixels'
+export { STALE_DIM } from './pixels'
 
 /** One frame, in milliseconds: 20 frames a second. */
 export const FRAME_MS = 50
@@ -34,6 +34,10 @@ export const FRAME_MS = 50
 export const WIPE_FRAMES = 6
 /** How far the wipe's head row goes toward the warm glint (Lively). */
 export const WIPE_GLINT = 0.35
+/** One glow cycle while Blender draws: the held frame brightens and darkens back over this many frames (1.6 s). */
+export const GLOW_FRAMES = 32
+/** How far the glow lightens the held frame toward white at its peak, by level. */
+export const GLOW_GAIN: Record<'lively' | 'subtle', number> = { lively: 0.12, subtle: 0.06 }
 /** The Lively spinner steps every this many frames (0.2 s). */
 export const SPIN_FRAMES = 4
 /** The Subtle spinner steps every this many frames (1 s). */
@@ -62,6 +66,9 @@ export type DotState = 'idle' | 'stale' | 'rendering' | 'error' | 'empty'
 
 type Dir = 'up' | 'down'
 
+/** Which way the wipe goes: rows from the top down, or columns from the left. */
+export type WipeDir = 'down' | 'right'
+
 /** A figure that rolls like an odometer toward its target. */
 export type Odo = {
   /** The value it rolls toward; null before the first frame. */
@@ -77,8 +84,12 @@ export type PaneMotion = {
   /** False until a frame was seen: the first frame is taken silently. */
   primed: boolean
   seq: number
-  /** The wipe: `old` is the image on screen before the new frame, null when there was none of the same size. */
-  wipe: { start: number; old: Cell[] | null } | null
+  /** The wipe: `old` is the image on screen before the new frame, null when there was none of the same size. `dir` is the way it goes. */
+  wipe: { start: number; old: Cell[] | null; dir: WipeDir } | null
+  /** The way the next shown wipe goes: down first, then right, by turns. */
+  nextWipe: WipeDir
+  /** The tick the glow started at while Blender draws; null when no draw is in flight. */
+  glowStart: number | null
   pulse: { start: number } | null
   badge: { start: number } | null
   errorPulse: { start: number } | null
@@ -94,6 +105,8 @@ export function createPaneMotion(): PaneMotion {
     primed: false,
     seq: 0,
     wipe: null,
+    nextWipe: 'down',
+    glowStart: null,
     pulse: null,
     badge: null,
     errorPulse: null,
@@ -110,7 +123,8 @@ function settleOdo(o: Odo, value: number): void {
 
 /**
  * A new frame was drawn. The first one after a load (and every one under Off) is taken silently; later ones start the
- * wipe, the agent pulse, the fresh badge and the figures' roll. `prevImage` is what was on screen, for the wipe.
+ * wipe, the agent pulse, the fresh badge and the figures' roll. `prevImage` is what was on screen, for the wipe. The wipe
+ * alternates: down, then right, by turns; a wipe with no old picture is invisible and does not use up a turn.
  */
 export function observeFrame(
   m: PaneMotion,
@@ -129,7 +143,8 @@ export function observeFrame(
 
     return
   }
-  m.wipe = { start: m.tick, old: prevImage }
+  m.wipe = { start: m.tick, old: prevImage, dir: m.nextWipe }
+  if (prevImage !== null) m.nextWipe = m.nextWipe === 'down' ? 'right' : 'down'
   m.pulse = frame.hasBy ? { start: m.tick } : null
   m.badge = { start: m.tick }
   for (const [o, value] of [
@@ -171,9 +186,14 @@ function stepOdo(o: Odo, tick: number): void {
   o.flash = { from: firstDiff(before, after), until: tick + FLASH_FRAMES, dir: gap > 0 ? 'up' : 'down' }
 }
 
-/** One frame on: the tick moves, and on roll ticks every figure steps toward its target, flashing the digits that changed. */
-export function advance(m: PaneMotion): void {
+/**
+ * One frame on: the tick moves, the glow starts or ends with the draw in flight, and on roll ticks every figure steps toward
+ * its target, flashing the digits that changed.
+ */
+export function advance(m: PaneMotion, isRendering: boolean): void {
   m.tick += 1
+  if (!isRendering) m.glowStart = null
+  else if (m.glowStart === null) m.glowStart = m.tick
   if (m.tick % ROLL_EVERY !== 0) return
   stepOdo(m.objects, m.tick)
   stepOdo(m.ms, m.tick)
@@ -210,7 +230,18 @@ function pulseAmount(p: { start: number } | null, tick: number, level: Motion): 
   return (PULSE_PROFILE[(tick - p.start) % PULSE_LENGTH] ?? 0) * PULSE_GAIN[level]
 }
 
-/** The picture at `m.tick`: the wipe, then the stale dim, then the shimmer (Lively or Subtle, while Blender draws). */
+/**
+ * How far the glow lightens at `m.tick`: a raised cosine from 0 up to the level's gain and back over `GLOW_FRAMES`; 0 under
+ * Off or when no draw is in flight.
+ */
+export function glowAmount(m: PaneMotion, level: Motion): number {
+  if (level === 'off' || m.glowStart === null) return 0
+  const p = ((m.tick - m.glowStart) % GLOW_FRAMES) / GLOW_FRAMES
+
+  return (GLOW_GAIN[level] * (1 - Math.cos(2 * Math.PI * p))) / 2
+}
+
+/** The picture at `m.tick`: the wipe (down or right), then the stale dim, then the glow (Lively or Subtle, while Blender draws). */
 export function composeImage(
   m: PaneMotion,
   base: Cell[],
@@ -229,11 +260,28 @@ export function composeImage(
     m.tick - wipe.start < WIPE_FRAMES
   ) {
     const old = wipe.old
-    const head = Math.floor(((m.tick - wipe.start + 1) * rows) / WIPE_FRAMES) - 1
+    const progress = m.tick - wipe.start
+    const right = wipe.dir === 'right'
+    // A right wipe runs over the picture's own columns (row 0 shows them all), not the blank margins around it.
+    let lo = 0
+    let span = rows
+    if (right) {
+      let first = -1
+      let last = -1
+      for (let cx = 0; cx < cols; cx++) {
+        if (base[cx]?.cp === HALF_TOP || old[cx]?.cp === HALF_TOP) {
+          if (first < 0) first = cx
+          last = cx
+        }
+      }
+      lo = first < 0 ? 0 : first
+      span = first < 0 ? cols : last - first + 1
+    }
+    const head = lo + Math.floor(((progress + 1) * span) / WIPE_FRAMES) - 1
     cells = base.map((cell, i) => {
-      const cy = Math.floor(i / cols)
-      if (cy < head) return cell
-      if (cy > head) return old[i] ?? cell
+      const c = right ? i % cols : Math.floor(i / cols)
+      if (c < head) return cell
+      if (c > head) return old[i] ?? cell
       if (level !== 'lively' || cell.cp !== HALF_TOP) return cell
 
       return {
@@ -244,7 +292,7 @@ export function composeImage(
     })
   }
   if (state.isStale || state.isRendering) cells = dimCells(cells, STALE_DIM)
-  if (level !== 'off' && state.isRendering) cells = shimmerCells(cells, cols, m.tick, SHIMMER_GAIN[level])
+  if (level !== 'off' && state.isRendering) cells = glowCells(cells, glowAmount(m, level))
 
   return cells
 }

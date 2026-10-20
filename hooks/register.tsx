@@ -656,10 +656,10 @@ async function step($: EngineInterface): Promise<void> {
 
       return
     }
-    advance(motion)
+    advance(motion, isRendering)
     if (playing !== null) playing.index = clipIndexAt(playing, await $.clock.now())
     for (const piece of target.pieces) {
-      // While only the shimmer moves the picture it is drawn at 10 fps; a playing clip at its own rate.
+      // While only the glow moves the picture it is drawn at 10 fps; a playing clip at its own rate.
       if (piece.key === KEY_IMAGE && playing === null && !isWipeActive(motion) && motion.tick % 2 !== 0) continue
       const cells = piece.compose()
       if (cells.length !== piece.width) {

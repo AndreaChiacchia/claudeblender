@@ -29,7 +29,7 @@
     "motion": {
       "type": "string",
       "title": "Motion",
-      "description": "How the pane moves. lively: a new frame wipes in from the top behind a warm glint line, a soft shimmer drifts across the old frame while Blender draws, the dot spins ◐ ◓ ◑ ◒ every 0.2 s, the object count and draw time roll with the changed digits flashing, the name of the agent that made the edit pulses in its color, ✦ fresh twinkles for 2 s, and a failed draw pulses ✗ red. subtle: the wipe without the glint, a fainter shimmer, the spinner a step every second, softer pulses, a plain fresh. off: a still pane, each frame swapped in at once.",
+      "description": "How the pane moves. lively: a new frame wipes in behind a warm glint line, from the top and from the left by turns, the held frame gently brightens and darkens while Blender draws, the dot spins ◐ ◓ ◑ ◒ every 0.2 s, the object count and draw time roll with the changed digits flashing, the name of the agent that made the edit pulses in its color, ✦ fresh twinkles for 2 s, and a failed draw pulses ✗ red. subtle: the wipe without the glint, a fainter glow, the spinner a step every second, softer pulses, a plain fresh. off: a still pane, each frame swapped in at once.",
       "default": "lively",
       "options": ["lively", "subtle", "off"]
     },

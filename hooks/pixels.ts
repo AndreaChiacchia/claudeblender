@@ -2,12 +2,6 @@ import type { Box, Pixels } from '../types'
 import { DEFAULT, HALF_TOP, INK_DARK, WHITE, mixColor } from './cells'
 import type { Cell } from './cells'
 
-/** The shimmer band moves this many cells a frame (an image frame is every other tick: 10 fps). */
-export const SHIMMER_SPEED = 5
-/** The band's feathered half-width in diagonal steps: it fades to nothing at this distance, with no hard edge. */
-export const SHIMMER_RADIUS = 8
-/** The most the band lightens a cell toward white, by motion level. */
-export const SHIMMER_GAIN: Record<'lively' | 'subtle', number> = { lively: 0.17, subtle: 0.09 }
 /** The stale dim: how far the held frame goes toward the dark ink while Blender draws or edits wait. */
 export const STALE_DIM = 0.2
 
@@ -98,20 +92,12 @@ export function dimCells(cells: Cell[], amount: number): Cell[] {
   })
 }
 
-/**
- * A soft diagonal band crossing the picture: `tick` moves its head `SHIMMER_SPEED` cells a frame, and the band fades out
- * over `SHIMMER_RADIUS` steps on a smoothstep (flat at its center, no visible edge). `gain` is its peak lightening.
- */
-export function shimmerCells(cells: Cell[], cols: number, tick: number, gain: number): Cell[] {
-  const rows = Math.ceil(cells.length / cols)
-  const head = ((tick * SHIMMER_SPEED) % (cols + 2 * rows + 2 * SHIMMER_RADIUS)) - SHIMMER_RADIUS
+/** The picture toward white by `amount`, every picture cell alike; blanks and a missing bottom pixel stay as they are. */
+export function glowCells(cells: Cell[], amount: number): Cell[] {
+  if (amount <= 0) return cells
 
-  return cells.map((cell, i) => {
-    const cx = i % cols
-    const cy = Math.floor(i / cols)
-    const x = Math.abs(cx + 2 * cy - head) / SHIMMER_RADIUS
-    const amount = x >= 1 ? 0 : gain * (1 - x * x * (3 - 2 * x))
-    if (amount <= 0) return cell
+  return cells.map(cell => {
+    if (cell.cp !== HALF_TOP) return cell
 
     return {
       cp: cell.cp,
@@ -120,3 +106,4 @@ export function shimmerCells(cells: Cell[], cols: number, tick: number, gain: nu
     }
   })
 }
+
