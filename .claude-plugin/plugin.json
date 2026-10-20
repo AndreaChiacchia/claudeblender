@@ -1,6 +1,6 @@
 {
   "name": "claudeblender",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A pane with a live low-res view of your Blender scene, redrawn in half-block pixels after every Blender edit Claude or a subagent makes, with an animation preview, motion effects and settings in /config",
   "author": { "name": "AndreaChiacchia", "url": "https://github.com/AndreaChiacchia" },
   "license": "MIT",
